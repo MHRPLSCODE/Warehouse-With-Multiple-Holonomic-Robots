@@ -1,410 +1,467 @@
-# Grid Path Planner (ROS2)
+# Multi-Robot Crate Handling System (ROS2)
 
-Centralized multi-robot path planner for an arena-based crate pickup and drop system.
-Implements task allocation, grid-based navigation, collision avoidance, and structured drop-zone placement.
+Centralized perception-driven robotics system for autonomous crate collection, transport, and structured placement inside a constrained arena using multiple mobile robots.
 
----
-
-# Overview
-
-This planner controls multiple mobile robots operating inside a **2.4384 m × 2.4384 m arena**.
-Robots must:
-
-1. Navigate to crates detected by perception
-2. Align perpendicular to the crate
-3. Pick up the crate
-4. Navigate to the correct drop zone
-5. Place crates in structured stacking patterns
-6. Return to home positions
-
-The planner operates entirely in **grid space** while perception provides **continuous world coordinates**.
+The project integrates **vision-based localization, centralized path planning, robot controllers, and task coordination** using ROS2.
 
 ---
 
-# Core Capabilities
+# System Objective
 
-### Multi-Robot Path Planning
+Multiple robots operate inside a square arena to:
 
-Uses **A*** search on a discrete grid to generate collision-free navigation paths.
+1. Detect crates using overhead vision
+2. Estimate crate and robot poses in a common world frame
+3. Assign crates to robots
+4. Plan collision-free paths
+5. Perform perpendicular crate pickup
+6. Deliver crates to designated drop zones
+7. Execute structured stacking
+8. Return robots to home positions
 
-### Task Allocation
+The architecture separates:
 
-Crates are assigned to bots based on nearest distance.
-
-### Spatial Reservation
-
-Paths reserve surrounding grid cells to enforce minimum robot separation.
-
-### Collision Resolution
-
-When robots approach too closely:
-
-* higher priority robot continues
-* lower priority robot computes a **backoff waypoint**
-* planner resumes after clearance
-
-### Structured Drop Placement
-
-Drop zones enforce deterministic placement rules:
-
-1. First crate → free base cell
-2. Second crate → adjacent base cell
-3. Third crate → stacked on base
-
-### Entry Alignment
-
-Robots do not directly enter drop cells.
-
-Instead they:
-
-```
-A* navigation → pink entry strip → controller drives straight into drop cell
+```text
+Perception
+Planning
+Control
+Visualization
 ```
 
-This isolates precise placement from navigation noise.
+This separation allows each subsystem to operate independently while communicating through ROS topics.
 
 ---
 
 # System Architecture
 
 ```
-Camera → Homography → World coordinates
-                     ↓
-                Grid planner
-                     ↓
-           A* path planning
-                     ↓
-       Path reservation / collision logic
-                     ↓
-            Path published to controller
+                CAMERA
+                   │
+                   ▼
+          Homography Estimator
+                   │
+                   ▼
+           World Coordinate Frame
+                   │
+        ┌──────────┴──────────┐
+        ▼                     ▼
+   Robot Pose Node      Crate Pose Node
+        │                     │
+        └──────────┬──────────┘
+                   ▼
+             Grid Planner
+                   │
+        ┌──────────┴──────────┐
+        ▼          ▼          ▼
+    Bot0 Ctrl   Bot2 Ctrl   Bot4 Ctrl
+        │          │          │
+        ▼          ▼          ▼
+      Robot       Robot      Robot
 ```
 
-Arena discretization:
-
-```
-Arena size      : 2438.4 mm
-Grid resolution : 96 × 96
-Cell size       : ≈25.4 mm
-```
+The **planner node acts as the centralized decision system**, while controllers execute trajectories locally.
 
 ---
 
-# Planner State Machine
+# Arena Model
 
-Each robot operates under a finite state machine.
+Arena size:
 
 ```
-IDLE
-  ↓
-TO_CRATE
-  ↓
-TO_PINK (drop entry strip)
-  ↓
-TO_HOME
-  ↓
-IDLE
+2438.4 mm × 2438.4 mm
 ```
 
-Transitions are triggered by controller notifications on:
+Grid representation:
+
+```
+96 × 96 grid
+```
+
+Cell resolution:
+
+```
+≈25.4 mm
+```
+
+The grid is used only for path planning.
+Robot motion remains continuous in world coordinates.
+
+---
+
+# Robots
+
+Three robots operate simultaneously.
+
+| Robot ID | Role         |
+| -------- | ------------ |
+| 0        | mobile robot |
+| 2        | mobile robot |
+| 4        | mobile robot |
+
+Each robot has:
+
+* differential or omni drive base
+* crate pickup mechanism
+* onboard controller node
+
+---
+
+# Major Components
+
+## 1. Vision System
+
+Responsible for detecting robot and crate poses.
+
+Outputs:
+
+```
+/bot_pose
+/crate_pose
+```
+
+Coordinate system is the **arena world frame (mm)**.
+
+The world frame is produced by applying a **homography transform** from the camera image.
+
+---
+
+## 2. Homography Estimation
+
+Computes transformation:
+
+```
+camera pixels → arena world coordinates
+```
+
+Published on:
+
+```
+/arena/homography
+```
+
+Used by the planner for visualization and coordinate conversion.
+
+---
+
+## 3. Grid Planner
+
+Central planning node responsible for:
+
+* task allocation
+* path planning
+* collision avoidance
+* drop zone placement
+* robot state machine
+
+Planner uses:
+
+```
+A* search on discrete grid
+```
+
+while robots execute waypoints in world coordinates.
+
+Planner outputs paths through ROS topics.
+
+---
+
+## 4. Robot Controllers
+
+Each robot has a controller node responsible for:
+
+* receiving waypoint paths
+* following path
+* performing crate pickup
+* performing crate drop
+* reporting path completion
+
+Controller publishes:
 
 ```
 /planner/path_done
 ```
 
+when a path is finished.
+
+---
+
+## 5. Drop Zone Manager
+
+Drop zones enforce placement rules.
+
+Each zone:
+
+```
+structured grid
+```
+
+Crate placement logic:
+
+```
+1st crate → base cell
+2nd crate → adjacent base cell
+3rd crate → stacked
+```
+
+Zones:
+
+| Zone | Color | Grid |
+| ---- | ----- | ---- |
+| D1   | Red   | 4×6  |
+| D2   | Green | 4×4  |
+| D3   | Blue  | 4×4  |
+
+---
+
+# Robot State Machine
+
+Each robot follows this planner-driven state machine:
+
+```
+IDLE
+  │
+  ▼
+TO_CRATE
+  │
+  ▼
+TO_PINK_ENTRY
+  │
+  ▼
+DROP_CRATE
+  │
+  ▼
+TO_HOME
+  │
+  ▼
+IDLE
+```
+
+State transitions occur when the controller signals path completion.
+
+---
+
+# Navigation Strategy
+
+Robots do not drive directly into drop cells.
+
+Instead they navigate in two stages:
+
+```
+A* path → entry alignment strip → straight insertion
+```
+
+This reduces path planning complexity near the drop zone.
+
+---
+
+# Collision Avoidance
+
+The planner enforces spatial separation.
+
+Minimum robot distance:
+
+```
+220 mm
+```
+
+If robots approach closer:
+
+1. priority rule selects winner
+2. losing robot computes retreat point
+3. retreat command published
+4. planning resumes once clearance achieved
+
+---
+
+# Task Allocation
+
+Crates are assigned using a greedy nearest-distance rule.
+
+```
+distance(bot, crate)
+```
+
+Assignments update dynamically as crates are completed.
+
 ---
 
 # ROS2 Topics
 
-## Subscriptions
-
-### `/camera/image_raw`
+## Perception
 
 ```
+/camera/image_raw
 sensor_msgs/Image
 ```
 
-Raw camera frame used for arena visualization.
-
----
-
-### `/arena/homography`
-
 ```
-Float64MultiArray (9 elements)
-```
-
-Homography matrix mapping camera image → arena world frame.
-
----
-
-### `/bot_pose`
-
-```
-hb_interfaces/Poses2D
-```
-
-World-frame pose estimates for all robots.
-
-Fields:
-
-```
-id
-x
-y
-yaw
-```
-
----
-
-### `/crate_pose`
-
-```
-hb_interfaces/Poses2D
-```
-
-Detected crate poses.
-
-Fields:
-
-```
-id
-x
-y
-yaw
-```
-
----
-
-### `/planner/path_done`
-
-```
-std_msgs/Int32
-```
-
-Controller notification that a robot completed its current path.
-
----
-
-# Publications
-
-## Navigation Paths
-
-Paths are published as world-coordinate waypoint sequences.
-
-```
+/arena/homography
 Float64MultiArray
-[x1,y1,x2,y2,x3,y3,...]
 ```
 
-Topics:
+```
+/bot_pose
+hb_interfaces/Poses2D
+```
+
+```
+/crate_pose
+hb_interfaces/Poses2D
+```
+
+---
+
+## Planner Output
+
+Paths:
 
 ```
 /planner/path_to_crate_bot0
 /planner/path_to_crate_bot2
 /planner/path_to_crate_bot4
+```
 
+```
 /planner/path_to_pink_bot0
 /planner/path_to_pink_bot2
 /planner/path_to_pink_bot4
+```
 
+```
 /planner/path_to_home_bot0
 /planner/path_to_home_bot2
 /planner/path_to_home_bot4
 ```
 
----
-
-## Pickup Target
+Pickup target:
 
 ```
 /planner/pickup_target
-Float64MultiArray
-[x, y, yaw]
 ```
 
-Defines the exact docking pose for crate pickup.
-
-Robot approaches **perpendicular to crate orientation**.
-
----
-
-## Backoff Target
+Backoff command:
 
 ```
 /planner/backoff_target
-Float64MultiArray
-[x, y, yaw]
 ```
 
-Published when collision resolution requires a robot to retreat.
-
----
-
-## Assigned Crate IDs
-
-Latched topics informing controllers which crate they are responsible for.
+Crate assignments:
 
 ```
-/planner/crate_id_bot0
-/planner/crate_id_bot2
-/planner/crate_id_bot4
+/planner/crate_id_botX
 ```
 
----
-
-## Stack Flag
-
-Signals when a crate must be stacked on top of an existing base crate.
+Stacking flag:
 
 ```
-/planner/stack_flag_bot0
-/planner/stack_flag_bot2
-/planner/stack_flag_bot4
+/planner/stack_flag_botX
 ```
-
----
-
-# Drop Zone Layout
-
-Three drop zones exist:
-
-| Zone | Color | Function        |
-| ---- | ----- | --------------- |
-| D1   | Red   | base + stacking |
-| D2   | Green | base + stacking |
-| D3   | Blue  | base + stacking |
-
-Each zone contains a structured grid of drop cells.
-
-Example:
-
-```
-D1 : 4 × 6 grid
-D2 : 4 × 4 grid
-D3 : 4 × 4 grid
-```
-
-Cells are generated deterministically inside the zone boundaries.
-
----
-
-# Collision Handling
-
-Robots maintain minimum separation:
-
-```
-COLLISION_RADIUS = 220 mm
-```
-
-If violated:
-
-1. pair priority evaluated
-2. lower priority robot computes retreat waypoint
-3. backoff command issued
-4. planning resumes after clearance
-
-Backoff distance:
-
-```
-BACKOFF_MM = 100
-```
-
----
-
-# Path Reservation
-
-Each published path reserves a corridor:
-
-```
-PATH_SEPARATION_MM = 250
-```
-
-Grid cells surrounding the path are marked occupied to prevent other robots planning through the same space.
 
 ---
 
 # Visualization
 
-The planner provides a debug window showing:
+Planner includes a real-time debugging display.
+
+Shows:
 
 * arena grid
-* drop zone boundaries
-* entry strips
 * robot positions
-* planned paths
-* crate local grids
+* crate locations
+* drop zone grids
+* entry alignment strips
+* planned robot paths
 
 Display resolution:
 
 ```
-900 × 900 pixels
+900 × 900
 ```
 
 ---
 
-# Execution
+# Running the System
 
-Run node:
-
-```
-ros2 run <package_name> grid_planner
-```
-
-Node name:
+Launch order:
 
 ```
-grid_planner
+1. camera node
+2. homography estimator
+3. perception nodes
+4. planner node
+5. robot controller nodes
 ```
 
-Main loop:
+Example command:
 
 ```
-rclpy.spin_once()
-planner.spin_once()
+ros2 run <package> grid_planner
 ```
-
----
-
-# Key Parameters
-
-| Parameter           | Value  | Description            |
-| ------------------- | ------ | ---------------------- |
-| ARENA_MM            | 2438.4 | arena size             |
-| GRID_N              | 96     | grid resolution        |
-| CELL_MM             | 25.4   | cell size              |
-| COLLISION_RADIUS_MM | 220    | collision threshold    |
-| PATH_SEPARATION_MM  | 250    | path reservation width |
-| BACKOFF_MM          | 100    | retreat distance       |
 
 ---
 
 # Dependencies
 
+Required packages:
+
 ```
-rclpy
-opencv-python
-numpy
+ROS2 (Humble or newer)
+OpenCV
+NumPy
 cv_bridge
-ROS2 message packages
 ```
 
-Custom interface:
+Custom message package:
 
 ```
-hb_interfaces/Poses2D
+hb_interfaces
+```
+
+Message used:
+
+```
+Poses2D
 ```
 
 ---
 
-# Limitations
+# Known Limitations
 
-* Planner uses spatial reservations only (no time dimension).
-* Greedy nearest-distance crate assignment.
-* Entry corridor resource locking currently disabled.
-* Performance optimized for ≤3 robots.
+Planner uses **spatial reservation only**.
+
+Limitations include:
+
+* no time dimension in path planning
+* greedy task allocation
+* scaling limited to small robot counts
+* entry corridor locking currently disabled
+
+The system is optimized for **three robots**.
 
 ---
 
-# License
+# Future Improvements
 
-Project intended for research / robotics competition use.
+Potential improvements:
+
+```
+time-expanded multi-agent planning
+CBS or SIPP planners
+predictive collision avoidance
+improved crate assignment optimization
+entry corridor resource locking
+```
+
+---
+
+# Project Purpose
+
+Designed for:
+
+```
+multi-robot research
+robotics competitions
+autonomous warehouse experiments
+```
+
+The project demonstrates a complete robotics stack integrating **vision, planning, and control** in a structured arena environment.
